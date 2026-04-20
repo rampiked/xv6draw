@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# Local environment and Python cache
+.env
+__pycache__/
+*.pyc
+
+# Editor and local indexing
+cscope.out
+
+# xv6 generated build artifacts
+*.o
+*.d
+*.asm
+*.sym
+vectors.S
+bootblock
+entryother
+initcode
+initcode.out
+kernel
+kernelmemfs
+mkfs
+.depend
+.gdbinit
+
+# xv6 filesystem and disk images
+fs.img
+xv6.img
+xv6memfs.img
+
+# xv6 generated user binaries
+_*
+
+# Local debug captures and runtime dumps
+qemu-*.png
+qemu-*.ppm

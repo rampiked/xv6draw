@@ -1,0 +1,285 @@
+From 535182c60f820c7c3fb7bb32b06939c96ac6a73a Mon Sep 17 00:00:00 2001
+From: Danny-Nguyen-05 <nguyencuongphuc48@gmail.com>
+Date: Sun, 12 Apr 2026 23:04:27 -0500
+Subject: [PATCH 1/2] hw6 part1: implement eager mmap
+
+---
+ proc.c    |  4 ++-
+ sysproc.c | 78 ++++++++++++++++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 77 insertions(+), 5 deletions(-)
+
+diff --git a/proc.c b/proc.c
+index 0e21eaf..9f5e4bf 100644
+--- a/proc.c
++++ b/proc.c
+@@ -73,7 +73,9 @@ found:
+   memset(p->context, 0, sizeof *p->context);
+   p->context->rip = (addr_t)forkret;
+ 
+-  // TODO: initialize the mmap metadata for each new process
++  // Initialize the mmap metadata for each new process
++  p->mmaptop = (char*)MMAPBASE;
++  p->mmapcount = 0;
+ 
+   return p;
+ }
+diff --git a/sysproc.c b/sysproc.c
+index 9a9eb7a..c5c5a48 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -97,16 +97,86 @@ addr_t
+ sys_mmap(void)
+ {
+   int fd, flags;
+-  if(argint(0,&fd) < 0 || argint(1,&flags) < 0)
++  if(argint(0, &fd) < 0 || argint(1, &flags) < 0)
+     return MMAP_FAILED;
+ 
+-  // TODO: your implementation
+-  return MMAP_FAILED;
++  // Validate the file descriptor
++  if(fd < 0 || fd >= NOFILE || proc->ofile[fd] == 0)
++    return MMAP_FAILED;
++
++  struct file *f = proc->ofile[fd];
++
++  // We only handle regular inode files
++  if(f->type != FD_INODE)
++    return MMAP_FAILED;
++
++  // Get the file size from the inode
++  ilock(f->ip);
++  uint filesize = f->ip->size;
++  iunlock(f->ip);
++
++  if(filesize == 0)
++    return MMAP_FAILED;
++
++  // Make sure we haven't exceeded the mmap slot limit
++  if(proc->mmapcount >= 10)
++    return MMAP_FAILED;
++
++  // The virtual address where this mapping starts
++  addr_t va = (addr_t)proc->mmaptop;
++
++  // How many bytes to reserve (rounded up to a page boundary)
++  addr_t rounded = PGROUNDUP(filesize);
++
++  // Allocate and map physical pages one at a time, reading file content as we go.
++  // We use the kernel virtual address (mem) returned by kalloc() directly,
++  // avoiding any need to call the static walkpgdir() from outside vm.c.
++  ilock(f->ip);
++  uint remaining = filesize;
++  uint off = 0;
++  addr_t a;
++  for(a = 0; a < rounded; a += PGSIZE) {
++    char *mem = kalloc();
++    if(mem == 0) {
++      iunlock(f->ip);
++      return MMAP_FAILED;
++    }
++    memset(mem, 0, PGSIZE);
++    if(mappages(proc->pgdir, (char*)(va + a), PGSIZE, V2P(mem), PTE_W | PTE_U) < 0) {
++      kfree(mem);
++      iunlock(f->ip);
++      return MMAP_FAILED;
++    }
++    // Read up to one page of file data into this physical page
++    if(remaining > 0) {
++      uint n = remaining < PGSIZE ? remaining : PGSIZE;
++      if(readi(f->ip, mem, off, n) != n) {
++        iunlock(f->ip);
++        return MMAP_FAILED;
++      }
++      off += n;
++      remaining -= n;
++    }
++  }
++  iunlock(f->ip);
++
++  // Record the mapping metadata
++  proc->mmaps[proc->mmapcount].fd = fd;
++  proc->mmaps[proc->mmapcount].start = va;
++  proc->mmapcount++;
++
++  // Advance mmaptop past the pages we just allocated
++  proc->mmaptop += rounded;
++
++  // Flush the TLB so the CPU uses the updated page table
++  switchuvm(proc);
++
++  return va;
+ }
+ 
+ int
+ handle_pagefault(addr_t va)
+ {
+-  // TODO: your code here
++  // TODO: your code here (lazy mmap, Part 2)
+   return 0;
+ }
+-- 
+2.50.1 (Apple Git-155)
+
+
+From 3be46a2fbadcb325751c040d226216cf50c1796c Mon Sep 17 00:00:00 2001
+From: Danny-Nguyen-05 <nguyencuongphuc48@gmail.com>
+Date: Sun, 12 Apr 2026 23:08:48 -0500
+Subject: [PATCH 2/2] hw6 part2: implement lazy mmap with page fault handler
+
+---
+ proc.h    |   1 +
+ sysproc.c | 109 +++++++++++++++++++++++++++++++++++++-----------------
+ 2 files changed, 77 insertions(+), 33 deletions(-)
+
+diff --git a/proc.h b/proc.h
+index f93a8e7..ed2b953 100644
+--- a/proc.h
++++ b/proc.h
+@@ -68,6 +68,7 @@ struct proc {
+   struct {
+     int fd;
+     addr_t start;
++    uint size;    // file size in bytes (for page fault handler)
+   } mmaps[10];
+ };
+ 
+diff --git a/sysproc.c b/sysproc.c
+index c5c5a48..6e8977c 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -128,55 +128,98 @@ sys_mmap(void)
+   // How many bytes to reserve (rounded up to a page boundary)
+   addr_t rounded = PGROUNDUP(filesize);
+ 
+-  // Allocate and map physical pages one at a time, reading file content as we go.
+-  // We use the kernel virtual address (mem) returned by kalloc() directly,
+-  // avoiding any need to call the static walkpgdir() from outside vm.c.
+-  ilock(f->ip);
+-  uint remaining = filesize;
+-  uint off = 0;
+-  addr_t a;
+-  for(a = 0; a < rounded; a += PGSIZE) {
+-    char *mem = kalloc();
+-    if(mem == 0) {
+-      iunlock(f->ip);
+-      return MMAP_FAILED;
+-    }
+-    memset(mem, 0, PGSIZE);
+-    if(mappages(proc->pgdir, (char*)(va + a), PGSIZE, V2P(mem), PTE_W | PTE_U) < 0) {
+-      kfree(mem);
+-      iunlock(f->ip);
+-      return MMAP_FAILED;
+-    }
+-    // Read up to one page of file data into this physical page
+-    if(remaining > 0) {
+-      uint n = remaining < PGSIZE ? remaining : PGSIZE;
+-      if(readi(f->ip, mem, off, n) != n) {
++  if(flags == 0) {
++    // ---- EAGER: allocate + map all pages and read file now ----
++    ilock(f->ip);
++    uint remaining = filesize;
++    uint off = 0;
++    addr_t a;
++    for(a = 0; a < rounded; a += PGSIZE) {
++      char *mem = kalloc();
++      if(mem == 0) {
+         iunlock(f->ip);
+         return MMAP_FAILED;
+       }
+-      off += n;
+-      remaining -= n;
++      memset(mem, 0, PGSIZE);
++      if(mappages(proc->pgdir, (char*)(va + a), PGSIZE, V2P(mem), PTE_W | PTE_U) < 0) {
++        kfree(mem);
++        iunlock(f->ip);
++        return MMAP_FAILED;
++      }
++      // Read up to one page of file data into this physical page
++      if(remaining > 0) {
++        uint n = remaining < PGSIZE ? remaining : PGSIZE;
++        if(readi(f->ip, mem, off, n) != n) {
++          iunlock(f->ip);
++          return MMAP_FAILED;
++        }
++        off += n;
++        remaining -= n;
++      }
+     }
++    iunlock(f->ip);
++    // Flush the TLB so the CPU uses the updated page table
++    switchuvm(proc);
+   }
+-  iunlock(f->ip);
++  // else flags == 1: LAZY — do nothing now; pages allocated on demand in handle_pagefault
+ 
+-  // Record the mapping metadata
++  // Record the mapping metadata (needed by both eager and lazy)
+   proc->mmaps[proc->mmapcount].fd = fd;
+   proc->mmaps[proc->mmapcount].start = va;
++  proc->mmaps[proc->mmapcount].size = filesize;
+   proc->mmapcount++;
+ 
+-  // Advance mmaptop past the pages we just allocated
++  // Advance mmaptop past the reserved virtual address range
+   proc->mmaptop += rounded;
+ 
+-  // Flush the TLB so the CPU uses the updated page table
+-  switchuvm(proc);
+-
+   return va;
+ }
+ 
+ int
+ handle_pagefault(addr_t va)
+ {
+-  // TODO: your code here (lazy mmap, Part 2)
+-  return 0;
++  // Find which mmap region (if any) contains the faulting address
++  int i;
++  for(i = 0; i < proc->mmapcount; i++) {
++    addr_t start = proc->mmaps[i].start;
++    uint   size  = proc->mmaps[i].size;
++    addr_t end   = start + PGROUNDUP(size);
++
++    if(va >= start && va < end) {
++      // Found the region. Allocate one physical page.
++      char *mem = kalloc();
++      if(mem == 0)
++        return 0;  // OOM — let process be killed
++      memset(mem, 0, PGSIZE);
++
++      // Map the page into the process address space
++      addr_t page_va = PGROUNDDOWN(va);
++      if(mappages(proc->pgdir, (char*)page_va, PGSIZE, V2P(mem), PTE_W | PTE_U) < 0) {
++        kfree(mem);
++        return 0;
++      }
++
++      // Compute file offset for this page
++      uint off = (uint)(page_va - start);
++
++      // How many bytes of file data fall on this page
++      uint n = PGSIZE;
++      if(off + n > size)
++        n = size - off;
++
++      // Read file content into the new page using the kernel VA from kalloc()
++      struct file *f = proc->ofile[proc->mmaps[i].fd];
++      ilock(f->ip);
++      if(readi(f->ip, mem, off, n) != n) {
++        iunlock(f->ip);
++        return 0;
++      }
++      iunlock(f->ip);
++
++      // Flush TLB
++      switchuvm(proc);
++      return 1;  // handled — trap.c will break instead of killing
++    }
++  }
++  return 0;  // not our fault — let trap.c kill the process
+ }
+-- 
+2.50.1 (Apple Git-155)
+
