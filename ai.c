@@ -4,8 +4,8 @@
 #include "spinlock.h"
 #include "proc.h"
 
-#define AI_PROMPT_MAX 256
-#define AI_RESPONSE_MAX 4096
+#define AI_PROMPT_MAX 512
+#define AI_RESPONSE_MAX 8192
 #define AI_LINE_MAX 128
 #define AI_TIMEOUT_TICKS 500000
 

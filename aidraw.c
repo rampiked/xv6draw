@@ -3,8 +3,8 @@
 #include "fcntl.h"
 #include "drawlib.h"
 
-#define AI_RESPONSE_MAX 4096
-#define AI_PROMPT_MAX 256
+#define AI_RESPONSE_MAX 8192
+#define AI_PROMPT_MAX 512
 
 static int
 set_display_mode(int mode)
