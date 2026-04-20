@@ -19,7 +19,7 @@ COMMAND_ARITY = {
     "FILLCIRCLE": 4,
     "END": 0,
 }
-MAX_GEMINI_REPAIRS = 2
+MAX_MODEL_REPAIRS = 2
 
 PROMPT_HINTS = {
     "car": "A car should usually have a rectangular body, a smaller roof, and two wheel circles.",
@@ -76,7 +76,8 @@ load_env_file(".env")
 
 HOST = os.environ.get("AIDRAW_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AIDRAW_PORT", "4444"))
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
+MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
+OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
 
 PROMPT_PREAMBLE = f"""Generate a drawing plan for a 320x200 canvas.
 Return JSON only. Do not return DSL directly.
@@ -177,44 +178,63 @@ def read_request(sock_file) -> str | None:
     return " ".join(part for part in prompt_lines if part).strip()
 
 
-def gemini_request_text(prompt_text: str) -> str | None:
-    api_key = os.environ.get("GEMINI_API_KEY")
+def extract_openai_response_text(body: dict) -> str | None:
+    output_text = body.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    parts = []
+    for item in body.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []):
+            if not isinstance(content, dict):
+                continue
+            text = content.get("text")
+            if isinstance(text, str) and content.get("type") in {"output_text", "text"}:
+                parts.append(text)
+
+    text = "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+    return text or None
+
+
+def openai_request_text(prompt_text: str) -> str | None:
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return None
 
     payload = {
-        "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "topP": 0.8,
-            "topK": 20,
-            "maxOutputTokens": 4096,
-            "responseMimeType": "application/json",
-            "thinkingConfig": {"thinkingBudget": 0},
-        },
+        "model": MODEL,
+        "input": prompt_text,
+        "max_output_tokens": 4096,
+        "reasoning": {"effort": "low"},
     }
     request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={api_key}",
+        OPENAI_API_URL,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
 
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", "ignore")
+        log(f"OpenAI request failed: HTTP {exc.code}: {details}")
+        return None
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        log(f"Gemini request failed: {exc}")
+        log(f"OpenAI request failed: {exc}")
         return None
 
-    try:
-        parts = body["candidates"][0]["content"]["parts"]
-    except (KeyError, IndexError, TypeError):
-        log("Gemini response did not contain candidate text")
+    text = extract_openai_response_text(body)
+    if text is None:
+        log("OpenAI response did not contain candidate text")
         return None
-
-    text = "\n".join(part.get("text", "") for part in parts).strip()
-    return text or None
+    return text
 
 
 def normalize_candidate_text(text: str) -> list[str]:
@@ -418,11 +438,11 @@ def canned_response(prompt: str) -> str:
     )
 
 
-def maybe_generate_with_gemini(prompt: str) -> str | None:
-    return gemini_request_text(PROMPT_PREAMBLE + prompt)
+def maybe_generate_with_openai(prompt: str) -> str | None:
+    return openai_request_text(PROMPT_PREAMBLE + prompt)
 
 
-def repair_gemini_output(prompt: str, bad_output: str, error: str) -> str | None:
+def repair_openai_output(prompt: str, bad_output: str, error: str) -> str | None:
     try:
         repair_prompt = REPAIR_PREAMBLE.format(
             prompt=prompt,
@@ -431,10 +451,10 @@ def repair_gemini_output(prompt: str, bad_output: str, error: str) -> str | None
             hints=prompt_hints(prompt),
         )
     except (KeyError, ValueError) as exc:
-        log(f"failed to build Gemini repair prompt: {exc}")
+        log(f"failed to build OpenAI repair prompt: {exc}")
         return None
 
-    return gemini_request_text(repair_prompt)
+    return openai_request_text(repair_prompt)
 
 
 def validate_response(text: str) -> str:
@@ -504,40 +524,40 @@ def semantic_validate_response(prompt: str, text: str) -> None:
 
 
 def generate_response(prompt: str) -> str:
-    candidate = maybe_generate_with_gemini(prompt)
+    candidate = maybe_generate_with_openai(prompt)
     if candidate is None:
         targeted = targeted_template(prompt)
         if targeted is not None:
-            log("Gemini unavailable, using prompt-specific template")
+            log("OpenAI unavailable, using prompt-specific template")
             return targeted
         return canned_response(prompt)
 
-    for attempt in range(MAX_GEMINI_REPAIRS + 1):
+    for attempt in range(MAX_MODEL_REPAIRS + 1):
         try:
             try:
                 validated = validate_json_response(candidate)
             except ValueError:
                 validated = validate_response(candidate)
             semantic_validate_response(prompt, validated)
-            log(f"accepted Gemini output: {validated!r}")
+            log(f"accepted OpenAI output: {validated!r}")
             return validated
         except ValueError as exc:
-            log(f"invalid Gemini output on attempt {attempt + 1}: {exc}")
-            log(f"raw Gemini output: {candidate!r}")
-            if attempt == MAX_GEMINI_REPAIRS:
+            log(f"invalid OpenAI output on attempt {attempt + 1}: {exc}")
+            log(f"raw OpenAI output: {candidate!r}")
+            if attempt == MAX_MODEL_REPAIRS:
                 targeted = targeted_template(prompt)
                 if targeted is not None:
                     log("using prompt-specific template fallback")
                     return targeted
                 log("using canned fallback")
                 return canned_response(prompt)
-            repaired = repair_gemini_output(prompt, candidate, str(exc))
+            repaired = repair_openai_output(prompt, candidate, str(exc))
             if repaired is None:
                 targeted = targeted_template(prompt)
                 if targeted is not None:
-                    log("Gemini repair failed, using prompt-specific template fallback")
+                    log("OpenAI repair failed, using prompt-specific template fallback")
                     return targeted
-                log("Gemini repair failed, using canned fallback")
+                log("OpenAI repair failed, using canned fallback")
                 return canned_response(prompt)
             candidate = repaired
 

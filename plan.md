@@ -420,7 +420,7 @@ Build a deterministic host agent before integrating Gemini.
 
 - `agent.py` should load optional local settings from `.env` if present.
 - Keep a `.env.example` file in the repo as the template.
-- Use `.env` for `GEMINI_API_KEY`, `AIDRAW_HOST`, `AIDRAW_PORT`, and `GEMINI_MODEL`.
+- Use `.env` for `OPENAI_API_KEY`, `AIDRAW_HOST`, `AIDRAW_PORT`, and `OPENAI_MODEL`.
 - Shell environment variables should continue to override `.env` values.
 
 ### Behavior
