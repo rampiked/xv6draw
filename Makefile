@@ -78,7 +78,7 @@ depend: .depend
 	rm -f "$@"
 	$(CC) -MM $^ > "$@"
 
-include .depend
+-include .depend
 # kernelmemfs is a copy of kernel that maintains the
 # disk image in memory instead of writing to a disk.
 # This is not so useful for testing persistent storage or
@@ -140,7 +140,8 @@ clean:
 	*.o *.d *.asm *.sym vectors.S bootblock entryother \
 	initcode initcode.out kernel xv6.img fs.img kernelmemfs mkfs \
 	.gdbinit .depend \
-	_*
+	$(UPROGS)
+	rm -rf __pycache__ qemu-*.png qemu-*.ppm
 
 # make a printout
 FILES = $(shell grep -v '^\#' runoff.list)
@@ -167,7 +168,8 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 ifndef CPUS
 CPUS := 2
 endif
-QEMUOPTS = -cpu qemu64,+rdtscp -nic none -hda xv6.img -hdb fs.img -smp sockets=$(CPUS) -m 512 $(QEMUEXTRA)
+QEMUDISKS = -drive file=xv6.img,index=0,media=disk,format=raw -drive file=fs.img,index=1,media=disk,format=raw
+QEMUOPTS = -cpu qemu64,+rdtscp -nic none $(QEMUDISKS) -smp sockets=$(CPUS) -m 512 $(QEMUEXTRA)
 
 qemu: fs.img xv6.img
 	$(QEMU) -serial mon:stdio $(QEMUOPTS)

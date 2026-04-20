@@ -7,11 +7,12 @@
 #define AI_PROMPT_MAX 256
 #define AI_RESPONSE_MAX 4096
 #define AI_LINE_MAX 128
-#define AI_TIMEOUT_TICKS 500
+#define AI_TIMEOUT_TICKS 500000
 
 static struct {
   struct spinlock lock;
   int active;
+  int draining;
   int suppress_console;
   int in_response;
   int complete;
@@ -39,6 +40,7 @@ ai_finish_locked(int failed)
   ai.failed = failed;
   ai.complete = 1;
   ai.active = 0;
+  ai.draining = 0;
   ai.suppress_console = 0;
   wakeup(&ai);
 }
@@ -85,6 +87,7 @@ aiinit(void)
   initlock(&ai.lock, "ai");
   acquire(&ai.lock);
   ai.active = 0;
+  ai.draining = 0;
   ai.suppress_console = 0;
   ai.in_response = 0;
   ai.complete = 0;
@@ -113,7 +116,7 @@ ai_is_active(void)
   int active;
 
   acquire(&ai.lock);
-  active = ai.active;
+  active = ai.active || ai.draining;
   release(&ai.lock);
   return active;
 }
@@ -122,7 +125,7 @@ void
 ai_uart_rx(int c)
 {
   acquire(&ai.lock);
-  if(!ai.active){
+  if(!ai.active && !ai.draining){
     release(&ai.lock);
     return;
   }
@@ -183,12 +186,13 @@ aiquery(char *prompt, int promptlen, char *response, int maxlen)
     return -1;
 
   acquire(&ai.lock);
-  if(ai.active){
+  if(ai.active || ai.draining){
     release(&ai.lock);
     return -1;
   }
 
   ai.active = 1;
+  ai.draining = 0;
   ai.suppress_console = 1;
   ai.in_response = 0;
   ai.complete = 0;
@@ -213,6 +217,7 @@ aiquery(char *prompt, int promptlen, char *response, int maxlen)
 
     if(proc->killed){
       ai.active = 0;
+      ai.draining = 1;
       ai.suppress_console = 0;
       release(&ai.lock);
       return -1;
@@ -223,6 +228,7 @@ aiquery(char *prompt, int promptlen, char *response, int maxlen)
     release(&tickslock);
     if(now - started >= AI_TIMEOUT_TICKS){
       ai.active = 0;
+      ai.draining = 1;
       ai.suppress_console = 0;
       release(&ai.lock);
       return -1;

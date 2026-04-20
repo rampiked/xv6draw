@@ -9,6 +9,44 @@ import urllib.error
 import urllib.request
 
 
+COMMAND_ARITY = {
+    "CLEAR": 1,
+    "PIXEL": 3,
+    "LINE": 5,
+    "RECT": 5,
+    "FILLRECT": 5,
+    "CIRCLE": 4,
+    "FILLCIRCLE": 4,
+    "END": 0,
+}
+MAX_GEMINI_REPAIRS = 2
+
+PROMPT_HINTS = {
+    "car": "A car should usually have a rectangular body, a smaller roof, and two wheel circles.",
+    "bus": "A bus should usually have a long rectangular body, windows made from rectangles, and two or more wheel circles.",
+    "truck": "A truck should usually have a cargo body, a cab, and at least two wheel circles.",
+    "vehicle": "A vehicle should usually have a body rectangle and wheel circles.",
+    "house": "A house should usually have a wall rectangle, a door rectangle, and roof lines.",
+    "flag": "A flag should usually be built from rectangles, not circles.",
+    "smiley": "A smiley should usually have one large face circle, two eye circles, and a mouth line.",
+    "mountain": "Mountains should usually be built from sloped lines forming peaks.",
+    "sunset": "A sunset should usually include a sun circle and a horizon or landscape.",
+}
+
+JSON_EXAMPLE = {
+    "commands": [
+        {"cmd": "CLEAR", "color": 9},
+        {"cmd": "FILLRECT", "x": 10, "y": 120, "w": 120, "h": 50, "color": 6},
+        {"cmd": "RECT", "x": 10, "y": 120, "w": 120, "h": 50, "color": 15},
+        {"cmd": "FILLCIRCLE", "x": 200, "y": 60, "radius": 20, "color": 14},
+        {"cmd": "LINE", "x1": 20, "y1": 40, "x2": 140, "y2": 40, "color": 12},
+        {"cmd": "END"},
+    ]
+}
+JSON_EXAMPLE_TEXT = json.dumps(JSON_EXAMPLE, indent=2)
+REPAIR_JSON_EXAMPLE_TEXT = JSON_EXAMPLE_TEXT.replace("{", "{{").replace("}", "}}")
+
+
 def load_env_file(path: str) -> None:
     if not os.path.exists(path):
         return
@@ -38,16 +76,27 @@ load_env_file(".env")
 
 HOST = os.environ.get("AIDRAW_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AIDRAW_PORT", "4444"))
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 
-PROMPT_PREAMBLE = """Generate only drawing DSL commands for a 320x200 canvas.
+PROMPT_PREAMBLE = f"""Generate a drawing plan for a 320x200 canvas.
+Return JSON only. Do not return DSL directly.
+Return exactly one JSON object with this shape:
+{JSON_EXAMPLE_TEXT}
+
 Rules:
-- Output only these commands: CLEAR, PIXEL, LINE, RECT, FILLRECT, CIRCLE, FILLCIRCLE, END.
-- Use integer arguments only.
+- The only allowed command names are CLEAR, PIXEL, LINE, RECT, FILLRECT, CIRCLE, FILLCIRCLE, END.
+- Use integers only.
 - Colors must be in the range 0..15.
 - Coordinates should stay within 0..319 for x and 0..199 for y.
-- End the output with END.
-- Do not include markdown, prose, or explanations.
+- The drawing must visibly match the user's request.
+- Do not reuse a house scene unless the user asked for a house.
+- Do not add a sun, house, or ground unless the user asked for them.
+- If asked for a car or bus, include wheels.
+- If asked for a smiley face, include a circular face, two eyes, and a mouth.
+- If asked for a flag, use rectangles for the flag body.
+- If asked for mountains, use lines to form peaks.
+- End the command list with {{"cmd": "END"}}.
+- Do not include markdown, prose, comments, or code fences.
 
 Color hints:
 0 black
@@ -63,6 +112,31 @@ Color hints:
 15 white
 
 User prompt:
+"""
+
+REPAIR_PREAMBLE = f"""Rewrite the broken drawing response so it becomes valid.
+Return JSON only. Do not return DSL directly.
+Return exactly one JSON object with this shape:
+{REPAIR_JSON_EXAMPLE_TEXT}
+
+Rules:
+- Use only these commands: CLEAR, PIXEL, LINE, RECT, FILLRECT, CIRCLE, FILLCIRCLE, END.
+- Use integers only.
+- Colors must be in the range 0..15.
+- End the command list with {{{{"cmd": "END"}}}}.
+- Do not include markdown, bullets, explanations, or code fences.
+
+Original drawing request:
+{{prompt}}
+
+Validation error:
+{{error}}
+
+Broken output:
+{{bad_output}}
+
+Drawing hints:
+{{hints}}
 """
 
 
@@ -101,6 +175,182 @@ def read_request(sock_file) -> str | None:
     if mode != "DRAW":
         return ""
     return " ".join(part for part in prompt_lines if part).strip()
+
+
+def gemini_request_text(prompt_text: str) -> str | None:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt_text}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "topP": 0.8,
+            "topK": 20,
+            "maxOutputTokens": 4096,
+            "responseMimeType": "application/json",
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    request = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={api_key}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        log(f"Gemini request failed: {exc}")
+        return None
+
+    try:
+        parts = body["candidates"][0]["content"]["parts"]
+    except (KeyError, IndexError, TypeError):
+        log("Gemini response did not contain candidate text")
+        return None
+
+    text = "\n".join(part.get("text", "") for part in parts).strip()
+    return text or None
+
+
+def normalize_candidate_text(text: str) -> list[str]:
+    normalized = []
+
+    for raw_line in text.replace(";", "\n").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("```"):
+            continue
+        if ":" in line:
+            prefix, suffix = line.split(":", 1)
+            if prefix.strip().upper() in COMMAND_ARITY:
+                line = prefix.strip() + " " + suffix.strip()
+        line = line.replace(",", " ")
+        line = line.replace("(", " ")
+        line = line.replace(")", " ")
+        parts = [part for part in line.split() if part not in {"-", "*"}]
+        if not parts:
+            continue
+        parts[0] = parts[0].upper()
+        normalized.append(" ".join(parts))
+
+    return normalized
+
+
+def extract_json_object(text: str) -> str:
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start < 0 or end < 0 or end <= start:
+        raise ValueError("no JSON object found")
+    return text[start:end + 1]
+
+
+def command_to_dsl(command: dict) -> str:
+    cmd = str(command.get("cmd", "")).upper()
+
+    if cmd == "CLEAR":
+        return f"CLEAR {int(command['color'])}"
+    if cmd == "PIXEL":
+        return f"PIXEL {int(command['x'])} {int(command['y'])} {int(command['color'])}"
+    if cmd == "LINE":
+        return f"LINE {int(command['x1'])} {int(command['y1'])} {int(command['x2'])} {int(command['y2'])} {int(command['color'])}"
+    if cmd == "RECT":
+        return f"RECT {int(command['x'])} {int(command['y'])} {int(command['w'])} {int(command['h'])} {int(command['color'])}"
+    if cmd == "FILLRECT":
+        return f"FILLRECT {int(command['x'])} {int(command['y'])} {int(command['w'])} {int(command['h'])} {int(command['color'])}"
+    if cmd == "CIRCLE":
+        return f"CIRCLE {int(command['x'])} {int(command['y'])} {int(command['radius'])} {int(command['color'])}"
+    if cmd == "FILLCIRCLE":
+        return f"FILLCIRCLE {int(command['x'])} {int(command['y'])} {int(command['radius'])} {int(command['color'])}"
+    if cmd == "END":
+        return "END"
+    raise ValueError(f"unsupported command in JSON: {cmd}")
+
+
+def validate_json_response(text: str) -> str:
+    try:
+        payload = json.loads(extract_json_object(text))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid JSON response: {exc}")
+
+    commands = payload.get("commands")
+    if not isinstance(commands, list) or not commands:
+        raise ValueError("JSON response must contain a non-empty commands list")
+
+    lines = []
+    for command in commands:
+        if not isinstance(command, dict):
+            raise ValueError("each JSON command must be an object")
+        lines.append(command_to_dsl(command))
+
+    return validate_response("\n".join(lines))
+
+
+def prompt_hints(prompt: str) -> str:
+    lowered = prompt.lower()
+    hints = []
+
+    for key, value in PROMPT_HINTS.items():
+        if key in lowered:
+            hints.append(value)
+
+    if not hints:
+        hints.append("Use simple large shapes that clearly match the requested object.")
+    return "\n".join(f"- {hint}" for hint in hints)
+
+
+def vehicle_template(prompt: str) -> str:
+    lowered = prompt.lower()
+
+    if "bus" in lowered:
+        return "\n".join(
+            [
+                "CLEAR 9",
+                "FILLRECT 0 150 320 50 2",
+                "FILLRECT 40 95 220 55 12",
+                "RECT 40 95 220 55 15",
+                "FILLRECT 55 108 30 18 15",
+                "FILLRECT 92 108 30 18 15",
+                "FILLRECT 129 108 30 18 15",
+                "FILLRECT 166 108 30 18 15",
+                "FILLRECT 203 108 30 18 15",
+                "FILLCIRCLE 90 155 18 0",
+                "FILLCIRCLE 210 155 18 0",
+                "CIRCLE 90 155 18 7",
+                "CIRCLE 210 155 18 7",
+                "END",
+            ]
+        )
+
+    return "\n".join(
+        [
+            "CLEAR 9",
+            "FILLRECT 0 150 320 50 2",
+            "FILLRECT 60 115 150 32 12",
+            "FILLRECT 95 90 70 30 12",
+            "RECT 60 115 150 32 15",
+            "RECT 95 90 70 30 15",
+            "FILLRECT 105 98 22 14 15",
+            "FILLRECT 132 98 22 14 15",
+            "FILLCIRCLE 95 150 16 0",
+            "FILLCIRCLE 180 150 16 0",
+            "CIRCLE 95 150 16 7",
+            "CIRCLE 180 150 16 7",
+            "END",
+        ]
+    )
+
+
+def targeted_template(prompt: str) -> str | None:
+    lowered = prompt.lower()
+
+    if any(word in lowered for word in ["car", "bus", "truck", "vehicle"]):
+        return vehicle_template(prompt)
+    return None
 
 
 def canned_response(prompt: str) -> str:
@@ -169,68 +419,36 @@ def canned_response(prompt: str) -> str:
 
 
 def maybe_generate_with_gemini(prompt: str) -> str | None:
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        return None
+    return gemini_request_text(PROMPT_PREAMBLE + prompt)
 
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": PROMPT_PREAMBLE + prompt,
-                    }
-                ]
-            }
-        ]
-    }
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={api_key}",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
 
+def repair_gemini_output(prompt: str, bad_output: str, error: str) -> str | None:
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        log(f"Gemini request failed: {exc}")
+        repair_prompt = REPAIR_PREAMBLE.format(
+            prompt=prompt,
+            error=error,
+            bad_output=bad_output,
+            hints=prompt_hints(prompt),
+        )
+    except (KeyError, ValueError) as exc:
+        log(f"failed to build Gemini repair prompt: {exc}")
         return None
 
-    try:
-        parts = body["candidates"][0]["content"]["parts"]
-    except (KeyError, IndexError, TypeError):
-        log("Gemini response did not contain candidate text")
-        return None
-
-    text = "\n".join(part.get("text", "") for part in parts).strip()
-    return text or None
+    return gemini_request_text(repair_prompt)
 
 
 def validate_response(text: str) -> str:
-    allowed = {
-        "CLEAR": 1,
-        "PIXEL": 3,
-        "LINE": 5,
-        "RECT": 5,
-        "FILLRECT": 5,
-        "CIRCLE": 4,
-        "FILLCIRCLE": 4,
-        "END": 0,
-    }
     cleaned = []
     saw_end = False
+    saw_command = False
 
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
+    for line in normalize_candidate_text(text):
         parts = line.split()
         command = parts[0]
-        if command not in allowed:
-            raise ValueError(f"unsupported command: {command}")
-        if len(parts) - 1 != allowed[command]:
+        if command not in COMMAND_ARITY:
+            continue
+        saw_command = True
+        if len(parts) - 1 != COMMAND_ARITY[command]:
             raise ValueError(f"wrong arity for command: {line}")
         if command == "END":
             cleaned.append("END")
@@ -243,24 +461,87 @@ def validate_response(text: str) -> str:
             if not 0 <= values[0] <= 15:
                 raise ValueError(f"invalid color in line: {line}")
         else:
+            for value in values[:-1]:
+                if value < -4096 or value > 4096:
+                    raise ValueError(f"unreasonable coordinate in line: {line}")
             if not 0 <= values[-1] <= 15:
                 raise ValueError(f"invalid color in line: {line}")
         cleaned.append(" ".join([command] + [str(value) for value in values]))
 
+    if not saw_command:
+        raise ValueError("no valid DSL commands found")
     if not saw_end:
         cleaned.append("END")
     return "\n".join(cleaned)
 
 
+def semantic_validate_response(prompt: str, text: str) -> None:
+    lowered = prompt.lower()
+    lines = [line.strip() for line in text.splitlines() if line.strip() and line.strip() != "END"]
+    commands = [line.split()[0] for line in lines]
+    circle_count = sum(command in {"CIRCLE", "FILLCIRCLE"} for command in commands)
+    rect_count = sum(command in {"RECT", "FILLRECT"} for command in commands)
+    line_count = sum(command == "LINE" for command in commands)
+
+    if any(word in lowered for word in ["car", "bus", "truck", "vehicle"]):
+        if circle_count < 2 or rect_count < 1:
+            raise ValueError("vehicle prompt requires at least two wheel circles and one body rectangle")
+    if "house" in lowered:
+        if rect_count < 2 or line_count < 2:
+            raise ValueError("house prompt requires wall rectangles and roof lines")
+    if "flag" in lowered:
+        if rect_count < 2:
+            raise ValueError("flag prompt requires rectangles for the flag body")
+    if any(word in lowered for word in ["smiley", "smile", "face"]):
+        if circle_count < 3 or line_count < 1:
+            raise ValueError("smiley prompt requires a face circle, eyes, and a mouth line")
+    if any(word in lowered for word in ["mountain", "mountains", "peak", "peaks"]):
+        if line_count < 2:
+            raise ValueError("mountain prompt requires line-based peaks")
+    if "sunset" in lowered:
+        if circle_count < 1:
+            raise ValueError("sunset prompt requires a sun circle")
+
+
 def generate_response(prompt: str) -> str:
     candidate = maybe_generate_with_gemini(prompt)
     if candidate is None:
+        targeted = targeted_template(prompt)
+        if targeted is not None:
+            log("Gemini unavailable, using prompt-specific template")
+            return targeted
         return canned_response(prompt)
-    try:
-        return validate_response(candidate)
-    except ValueError as exc:
-        log(f"invalid Gemini output, using canned fallback: {exc}")
-        return canned_response(prompt)
+
+    for attempt in range(MAX_GEMINI_REPAIRS + 1):
+        try:
+            try:
+                validated = validate_json_response(candidate)
+            except ValueError:
+                validated = validate_response(candidate)
+            semantic_validate_response(prompt, validated)
+            log(f"accepted Gemini output: {validated!r}")
+            return validated
+        except ValueError as exc:
+            log(f"invalid Gemini output on attempt {attempt + 1}: {exc}")
+            log(f"raw Gemini output: {candidate!r}")
+            if attempt == MAX_GEMINI_REPAIRS:
+                targeted = targeted_template(prompt)
+                if targeted is not None:
+                    log("using prompt-specific template fallback")
+                    return targeted
+                log("using canned fallback")
+                return canned_response(prompt)
+            repaired = repair_gemini_output(prompt, candidate, str(exc))
+            if repaired is None:
+                targeted = targeted_template(prompt)
+                if targeted is not None:
+                    log("Gemini repair failed, using prompt-specific template fallback")
+                    return targeted
+                log("Gemini repair failed, using canned fallback")
+                return canned_response(prompt)
+            candidate = repaired
+
+    return canned_response(prompt)
 
 
 def send_response(sock: socket.socket, body: str) -> None:
