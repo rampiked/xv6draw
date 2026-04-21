@@ -20,6 +20,22 @@ set_display_mode(int mode)
   return rc;
 }
 
+static int
+wait_for_keypress(void)
+{
+  char key;
+
+  if(ioctl(0, 2, 1) < 0)
+    return -1;
+  if(read(0, &key, 1) != 1){
+    ioctl(0, 2, 0);
+    return -1;
+  }
+  if(ioctl(0, 2, 0) < 0)
+    return -1;
+  return 0;
+}
+
 static void
 skip_spaces(char **cursor)
 {
@@ -247,7 +263,13 @@ main(int argc, char **argv)
     exit();
   }
 
-  sleep(200);
+  if(wait_for_keypress() < 0){
+    printf(2, "aidraw: failed to read keypress\n");
+    set_display_mode(0x3);
+    free(canvas);
+    free(response);
+    exit();
+  }
 
   if(set_display_mode(0x3) < 0){
     printf(2, "aidraw: failed to restore text mode\n");

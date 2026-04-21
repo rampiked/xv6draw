@@ -208,6 +208,7 @@ struct {
   uint r;  // Read index
   uint w;  // Write index
   uint e;  // Edit index
+  int raw; // Wake readers on each character when enabled.
 } input;
 
 #define C(x)  ((x)-'@')  // Control-x
@@ -244,7 +245,7 @@ consoleintr(int (*getc)(void))
         c = (c == '\r') ? '\n' : c;
         input.buf[input.e++ % INPUT_BUF] = c;
         consputc(c, console_global_color);
-        if (c == '\n' || c == C('D') || input.e == input.r+INPUT_BUF) {
+        if (input.raw || c == '\n' || c == C('D') || input.e == input.r+INPUT_BUF) {
           input.w = input.e;
           wakeup(&input.r);
         }
@@ -299,6 +300,15 @@ consoleioctl(struct file *f, int param, int value)
     return 0;
   } else if (param == 1) {
     console_global_color = value;
+    return 0;
+  } else if (param == 2) {
+    acquire(&input.lock);
+    input.raw = value ? 1 : 0;
+    if(input.raw && input.r != input.e){
+      input.w = input.e;
+      wakeup(&input.r);
+    }
+    release(&input.lock);
     return 0;
   }
   return -1;
