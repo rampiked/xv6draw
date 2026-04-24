@@ -76,7 +76,9 @@ load_env_file(".env")
 
 HOST = os.environ.get("AIDRAW_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AIDRAW_PORT", "4444"))
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
+AI_BACKEND = os.environ.get("AI_BACKEND", "gemini").strip().lower()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
 
 PROMPT_PREAMBLE = f"""Generate a drawing plan for a 320x200 canvas.
@@ -198,13 +200,57 @@ def extract_openai_response_text(body: dict) -> str | None:
     return text or None
 
 
+def gemini_request_text(prompt_text: str) -> str | None:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt_text}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "topP": 0.8,
+            "topK": 20,
+            "maxOutputTokens": 4096,
+            "responseMimeType": "application/json",
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    request = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", "ignore")
+        log(f"Gemini request failed: HTTP {exc.code}: {details}")
+        return None
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        log(f"Gemini request failed: {exc}")
+        return None
+
+    try:
+        parts = body["candidates"][0]["content"]["parts"]
+    except (KeyError, IndexError, TypeError):
+        log("Gemini response did not contain candidate text")
+        return None
+
+    text = "\n".join(part.get("text", "") for part in parts).strip()
+    return text or None
+
+
 def openai_request_text(prompt_text: str) -> str | None:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return None
 
     payload = {
-        "model": MODEL,
+        "model": OPENAI_MODEL,
         "input": prompt_text,
         "max_output_tokens": 4096,
         "reasoning": {"effort": "low"},
@@ -235,6 +281,28 @@ def openai_request_text(prompt_text: str) -> str | None:
         log("OpenAI response did not contain candidate text")
         return None
     return text
+
+
+def backend_display_name(backend: str) -> str:
+    if backend == "gemini":
+        return "Gemini"
+    if backend == "openai":
+        return "OpenAI"
+    return backend
+
+
+def backend_attempt_order() -> list[str]:
+    if AI_BACKEND in {"gemini", "openai"}:
+        return [AI_BACKEND]
+    return ["gemini", "openai"]
+
+
+def request_text_for_backend(backend: str, prompt_text: str) -> str | None:
+    if backend == "gemini":
+        return gemini_request_text(prompt_text)
+    if backend == "openai":
+        return openai_request_text(prompt_text)
+    return None
 
 
 def normalize_candidate_text(text: str) -> list[str]:
@@ -438,11 +506,11 @@ def canned_response(prompt: str) -> str:
     )
 
 
-def maybe_generate_with_openai(prompt: str) -> str | None:
-    return openai_request_text(PROMPT_PREAMBLE + prompt)
+def maybe_generate_with_backend(backend: str, prompt: str) -> str | None:
+    return request_text_for_backend(backend, PROMPT_PREAMBLE + prompt)
 
 
-def repair_openai_output(prompt: str, bad_output: str, error: str) -> str | None:
+def repair_output(backend: str, prompt: str, bad_output: str, error: str) -> str | None:
     try:
         repair_prompt = REPAIR_PREAMBLE.format(
             prompt=prompt,
@@ -451,10 +519,10 @@ def repair_openai_output(prompt: str, bad_output: str, error: str) -> str | None
             hints=prompt_hints(prompt),
         )
     except (KeyError, ValueError) as exc:
-        log(f"failed to build OpenAI repair prompt: {exc}")
+        log(f"failed to build {backend_display_name(backend)} repair prompt: {exc}")
         return None
 
-    return openai_request_text(repair_prompt)
+    return request_text_for_backend(backend, repair_prompt)
 
 
 def validate_response(text: str) -> str:
@@ -524,43 +592,38 @@ def semantic_validate_response(prompt: str, text: str) -> None:
 
 
 def generate_response(prompt: str) -> str:
-    candidate = maybe_generate_with_openai(prompt)
-    if candidate is None:
-        targeted = targeted_template(prompt)
-        if targeted is not None:
-            log("OpenAI unavailable, using prompt-specific template")
-            return targeted
-        return canned_response(prompt)
+    for backend in backend_attempt_order():
+        backend_name = backend_display_name(backend)
+        candidate = maybe_generate_with_backend(backend, prompt)
+        if candidate is None:
+            log(f"{backend_name} unavailable, trying next backend")
+            continue
 
-    for attempt in range(MAX_MODEL_REPAIRS + 1):
-        try:
+        for attempt in range(MAX_MODEL_REPAIRS + 1):
             try:
-                validated = validate_json_response(candidate)
-            except ValueError:
-                validated = validate_response(candidate)
-            semantic_validate_response(prompt, validated)
-            log(f"accepted OpenAI output: {validated!r}")
-            return validated
-        except ValueError as exc:
-            log(f"invalid OpenAI output on attempt {attempt + 1}: {exc}")
-            log(f"raw OpenAI output: {candidate!r}")
-            if attempt == MAX_MODEL_REPAIRS:
-                targeted = targeted_template(prompt)
-                if targeted is not None:
-                    log("using prompt-specific template fallback")
-                    return targeted
-                log("using canned fallback")
-                return canned_response(prompt)
-            repaired = repair_openai_output(prompt, candidate, str(exc))
-            if repaired is None:
-                targeted = targeted_template(prompt)
-                if targeted is not None:
-                    log("OpenAI repair failed, using prompt-specific template fallback")
-                    return targeted
-                log("OpenAI repair failed, using canned fallback")
-                return canned_response(prompt)
-            candidate = repaired
+                try:
+                    validated = validate_json_response(candidate)
+                except ValueError:
+                    validated = validate_response(candidate)
+                semantic_validate_response(prompt, validated)
+                log(f"accepted {backend_name} output: {validated!r}")
+                return validated
+            except ValueError as exc:
+                log(f"invalid {backend_name} output on attempt {attempt + 1}: {exc}")
+                log(f"raw {backend_name} output: {candidate!r}")
+                if attempt == MAX_MODEL_REPAIRS:
+                    break
+                repaired = repair_output(backend, prompt, candidate, str(exc))
+                if repaired is None:
+                    log(f"{backend_name} repair failed, trying next backend")
+                    break
+                candidate = repaired
 
+    targeted = targeted_template(prompt)
+    if targeted is not None:
+        log("using prompt-specific template fallback")
+        return targeted
+    log("using canned fallback")
     return canned_response(prompt)
 
 
