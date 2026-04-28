@@ -17,6 +17,12 @@ COMMAND_ARITY = {
     "FILLRECT": 5,
     "CIRCLE": 4,
     "FILLCIRCLE": 4,
+    "TRIANGLE": 7,
+    "FILLTRIANGLE": 7,
+    "ELLIPSE": 5,
+    "FILLELLIPSE": 5,
+    "POLYGON": None,
+    "FILLPOLYGON": None,
     "END": 0,
 }
 MAX_MODEL_REPAIRS = 2
@@ -37,9 +43,8 @@ JSON_EXAMPLE = {
     "commands": [
         {"cmd": "CLEAR", "color": 9},
         {"cmd": "FILLRECT", "x": 10, "y": 120, "w": 120, "h": 50, "color": 6},
-        {"cmd": "RECT", "x": 10, "y": 120, "w": 120, "h": 50, "color": 15},
-        {"cmd": "FILLCIRCLE", "x": 200, "y": 60, "radius": 20, "color": 14},
-        {"cmd": "LINE", "x1": 20, "y1": 40, "x2": 140, "y2": 40, "color": 12},
+        {"cmd": "TRIANGLE", "x1": 20, "y1": 120, "x2": 70, "y2": 70, "x3": 120, "y3": 120, "color": 15},
+        {"cmd": "FILLELLIPSE", "x": 220, "y": 70, "rx": 40, "ry": 20, "color": 14},
         {"cmd": "END"},
     ]
 }
@@ -87,10 +92,11 @@ Return exactly one JSON object with this shape:
 {JSON_EXAMPLE_TEXT}
 
 Rules:
-- The only allowed command names are CLEAR, PIXEL, LINE, RECT, FILLRECT, CIRCLE, FILLCIRCLE, END.
+- The only allowed command names are CLEAR, PIXEL, LINE, RECT, FILLRECT, CIRCLE, FILLCIRCLE, TRIANGLE, FILLTRIANGLE, ELLIPSE, FILLELLIPSE, POLYGON, FILLPOLYGON, END.
 - Use integers only.
 - Colors must be in the range 0..15.
 - Coordinates should stay within 0..319 for x and 0..199 for y.
+- For POLYGON and FILLPOLYGON, use a "points" array with 3 to 16 [x, y] pairs plus a color.
 - The drawing must visibly match the user's request.
 - Do not reuse a house scene unless the user asked for a house.
 - Do not add a sun, house, or ground unless the user asked for them.
@@ -123,9 +129,10 @@ Return exactly one JSON object with this shape:
 {REPAIR_JSON_EXAMPLE_TEXT}
 
 Rules:
-- Use only these commands: CLEAR, PIXEL, LINE, RECT, FILLRECT, CIRCLE, FILLCIRCLE, END.
+- Use only these commands: CLEAR, PIXEL, LINE, RECT, FILLRECT, CIRCLE, FILLCIRCLE, TRIANGLE, FILLTRIANGLE, ELLIPSE, FILLELLIPSE, POLYGON, FILLPOLYGON, END.
 - Use integers only.
 - Colors must be in the range 0..15.
+- For POLYGON and FILLPOLYGON, use a "points" array with 3 to 16 [x, y] pairs plus a color.
 - End the command list with {{{{"cmd": "END"}}}}.
 - Do not include markdown, bullets, explanations, or code fences.
 
@@ -337,23 +344,66 @@ def extract_json_object(text: str) -> str:
     return text[start:end + 1]
 
 
+def require_int(command: dict, *names: str) -> int:
+    for name in names:
+        if name in command:
+            return int(command[name])
+    raise ValueError(f"missing required field: {'/'.join(names)}")
+
+
+def require_circle_radius(command: dict) -> int:
+    if "radius" in command:
+        return int(command["radius"])
+    if "r" in command:
+        return int(command["r"])
+    if "rx" in command:
+        if "ry" in command and int(command["rx"]) != int(command["ry"]):
+            raise ValueError("circle command used ellipse radii rx/ry with different values")
+        return int(command["rx"])
+    if "ry" in command:
+        return int(command["ry"])
+    raise ValueError("missing required field: radius/r/rx")
+
+
 def command_to_dsl(command: dict) -> str:
     cmd = str(command.get("cmd", "")).upper()
 
     if cmd == "CLEAR":
-        return f"CLEAR {int(command['color'])}"
+        return f"CLEAR {require_int(command, 'color')}"
     if cmd == "PIXEL":
-        return f"PIXEL {int(command['x'])} {int(command['y'])} {int(command['color'])}"
+        return f"PIXEL {require_int(command, 'x')} {require_int(command, 'y')} {require_int(command, 'color')}"
     if cmd == "LINE":
-        return f"LINE {int(command['x1'])} {int(command['y1'])} {int(command['x2'])} {int(command['y2'])} {int(command['color'])}"
+        return f"LINE {require_int(command, 'x1')} {require_int(command, 'y1')} {require_int(command, 'x2')} {require_int(command, 'y2')} {require_int(command, 'color')}"
     if cmd == "RECT":
-        return f"RECT {int(command['x'])} {int(command['y'])} {int(command['w'])} {int(command['h'])} {int(command['color'])}"
+        return f"RECT {require_int(command, 'x')} {require_int(command, 'y')} {require_int(command, 'w', 'width')} {require_int(command, 'h', 'height')} {require_int(command, 'color')}"
     if cmd == "FILLRECT":
-        return f"FILLRECT {int(command['x'])} {int(command['y'])} {int(command['w'])} {int(command['h'])} {int(command['color'])}"
+        return f"FILLRECT {require_int(command, 'x')} {require_int(command, 'y')} {require_int(command, 'w', 'width')} {require_int(command, 'h', 'height')} {require_int(command, 'color')}"
     if cmd == "CIRCLE":
-        return f"CIRCLE {int(command['x'])} {int(command['y'])} {int(command['radius'])} {int(command['color'])}"
+        return f"CIRCLE {require_int(command, 'x')} {require_int(command, 'y')} {require_circle_radius(command)} {require_int(command, 'color')}"
     if cmd == "FILLCIRCLE":
-        return f"FILLCIRCLE {int(command['x'])} {int(command['y'])} {int(command['radius'])} {int(command['color'])}"
+        return f"FILLCIRCLE {require_int(command, 'x')} {require_int(command, 'y')} {require_circle_radius(command)} {require_int(command, 'color')}"
+    if cmd == "TRIANGLE":
+        return f"TRIANGLE {require_int(command, 'x1')} {require_int(command, 'y1')} {require_int(command, 'x2')} {require_int(command, 'y2')} {require_int(command, 'x3')} {require_int(command, 'y3')} {require_int(command, 'color')}"
+    if cmd == "FILLTRIANGLE":
+        return f"FILLTRIANGLE {require_int(command, 'x1')} {require_int(command, 'y1')} {require_int(command, 'x2')} {require_int(command, 'y2')} {require_int(command, 'x3')} {require_int(command, 'y3')} {require_int(command, 'color')}"
+    if cmd == "ELLIPSE":
+        return f"ELLIPSE {require_int(command, 'x')} {require_int(command, 'y')} {require_int(command, 'rx')} {require_int(command, 'ry')} {require_int(command, 'color')}"
+    if cmd == "FILLELLIPSE":
+        return f"FILLELLIPSE {require_int(command, 'x')} {require_int(command, 'y')} {require_int(command, 'rx')} {require_int(command, 'ry')} {require_int(command, 'color')}"
+    if cmd == "POLYGON" or cmd == "FILLPOLYGON":
+        points = command.get("points")
+        if not isinstance(points, list):
+            raise ValueError(f"{cmd} requires a points list")
+        if len(points) < 3 or len(points) > 16:
+            raise ValueError(f"{cmd} requires 3 to 16 points")
+        parts = [cmd, str(len(points))]
+        for point in points:
+            if not isinstance(point, list) or len(point) != 2:
+                raise ValueError(f"{cmd} points must be [x, y] pairs")
+            parts.append(str(int(point[0])))
+            parts.append(str(int(point[1])))
+        parts.append(str(require_int(command, "color")))
+        return " ".join(parts)
     if cmd == "END":
         return "END"
     raise ValueError(f"unsupported command in JSON: {cmd}")
@@ -373,7 +423,10 @@ def validate_json_response(text: str) -> str:
     for command in commands:
         if not isinstance(command, dict):
             raise ValueError("each JSON command must be an object")
-        lines.append(command_to_dsl(command))
+        try:
+            lines.append(command_to_dsl(command))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid JSON command: {exc}")
 
     return validate_response("\n".join(lines))
 
@@ -536,17 +589,30 @@ def validate_response(text: str) -> str:
         if command not in COMMAND_ARITY:
             continue
         saw_command = True
-        if len(parts) - 1 != COMMAND_ARITY[command]:
-            raise ValueError(f"wrong arity for command: {line}")
         if command == "END":
             cleaned.append("END")
             saw_end = True
             break
+        if command in {"POLYGON", "FILLPOLYGON"}:
+            if len(parts) < 8:
+                raise ValueError(f"wrong arity for command: {line}")
+            count = int(parts[1])
+            expected = 2 + count * 2
+            if count < 3 or count > 16 or len(parts) - 1 != expected:
+                raise ValueError(f"wrong arity for command: {line}")
+        elif len(parts) - 1 != COMMAND_ARITY[command]:
+            raise ValueError(f"wrong arity for command: {line}")
         values = []
         for item in parts[1:]:
             values.append(int(item))
         if command == "CLEAR":
             if not 0 <= values[0] <= 15:
+                raise ValueError(f"invalid color in line: {line}")
+        elif command in {"POLYGON", "FILLPOLYGON"}:
+            for value in values[1:-1]:
+                if value < -4096 or value > 4096:
+                    raise ValueError(f"unreasonable coordinate in line: {line}")
+            if not 0 <= values[-1] <= 15:
                 raise ValueError(f"invalid color in line: {line}")
         else:
             for value in values[:-1]:
@@ -569,25 +635,27 @@ def semantic_validate_response(prompt: str, text: str) -> None:
     commands = [line.split()[0] for line in lines]
     circle_count = sum(command in {"CIRCLE", "FILLCIRCLE"} for command in commands)
     rect_count = sum(command in {"RECT", "FILLRECT"} for command in commands)
-    line_count = sum(command == "LINE" for command in commands)
+    line_count = sum(command in {"LINE", "TRIANGLE", "FILLTRIANGLE", "POLYGON", "FILLPOLYGON"} for command in commands)
+    triangle_count = sum(command in {"TRIANGLE", "FILLTRIANGLE"} for command in commands)
+    ellipse_count = sum(command in {"ELLIPSE", "FILLELLIPSE"} for command in commands)
 
     if any(word in lowered for word in ["car", "bus", "truck", "vehicle"]):
-        if circle_count < 2 or rect_count < 1:
+        if circle_count + ellipse_count < 2 or rect_count < 1:
             raise ValueError("vehicle prompt requires at least two wheel circles and one body rectangle")
     if "house" in lowered:
-        if rect_count < 2 or line_count < 2:
+        if rect_count < 1 or line_count + triangle_count < 2:
             raise ValueError("house prompt requires wall rectangles and roof lines")
     if "flag" in lowered:
-        if rect_count < 2:
+        if rect_count < 2 and triangle_count < 1:
             raise ValueError("flag prompt requires rectangles for the flag body")
     if any(word in lowered for word in ["smiley", "smile", "face"]):
-        if circle_count < 3 or line_count < 1:
+        if circle_count + ellipse_count < 3 or line_count < 1:
             raise ValueError("smiley prompt requires a face circle, eyes, and a mouth line")
     if any(word in lowered for word in ["mountain", "mountains", "peak", "peaks"]):
-        if line_count < 2:
+        if line_count < 1 and triangle_count < 1:
             raise ValueError("mountain prompt requires line-based peaks")
     if "sunset" in lowered:
-        if circle_count < 1:
+        if circle_count + ellipse_count < 1:
             raise ValueError("sunset prompt requires a sun circle")
 
 

@@ -11,4 +11,10 @@ void canvas_rect(unsigned char *canvas, int x, int y, int w, int h, unsigned cha
 void canvas_fillrect(unsigned char *canvas, int x, int y, int w, int h, unsigned char color);
 void canvas_circle(unsigned char *canvas, int x, int y, int radius, unsigned char color);
 void canvas_fillcircle(unsigned char *canvas, int x, int y, int radius, unsigned char color);
+void canvas_triangle(unsigned char *canvas, int x1, int y1, int x2, int y2, int x3, int y3, unsigned char color);
+void canvas_filltriangle(unsigned char *canvas, int x1, int y1, int x2, int y2, int x3, int y3, unsigned char color);
+void canvas_ellipse(unsigned char *canvas, int x, int y, int rx, int ry, unsigned char color);
+void canvas_fillellipse(unsigned char *canvas, int x, int y, int rx, int ry, unsigned char color);
+void canvas_polygon(unsigned char *canvas, int *xs, int *ys, int count, unsigned char color);
+void canvas_fillpolygon(unsigned char *canvas, int *xs, int *ys, int count, unsigned char color);
 int canvas_blit(unsigned char *canvas);

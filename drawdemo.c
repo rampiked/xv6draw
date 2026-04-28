@@ -21,6 +21,8 @@ int
 main(int argc, char **argv)
 {
   unsigned char *canvas;
+  int hill_xs[5] = {18, 42, 72, 96, 58};
+  int hill_ys[5] = {150, 112, 120, 152, 170};
 
   canvas = malloc(CANVAS_SIZE);
   if(canvas == 0){
@@ -50,6 +52,13 @@ main(int argc, char **argv)
   canvas_fillcircle(canvas, 86, 54, 18, 7);
   canvas_fillcircle(canvas, 58, 63, 17, 15);
   canvas_fillcircle(canvas, 77, 66, 15, 7);
+
+  canvas_filltriangle(canvas, 18, 140, 54, 86, 98, 140, 8);
+  canvas_triangle(canvas, 18, 140, 54, 86, 98, 140, 15);
+  canvas_fillellipse(canvas, 264, 112, 34, 18, 1);
+  canvas_ellipse(canvas, 264, 112, 34, 18, 15);
+  canvas_fillpolygon(canvas, hill_xs, hill_ys, 5, 10);
+  canvas_polygon(canvas, hill_xs, hill_ys, 5, 15);
 
   canvas_line(canvas, 240, 18, 265, 48, 12);
   canvas_line(canvas, 228, 30, 272, 52, 12);

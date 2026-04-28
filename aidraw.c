@@ -5,6 +5,7 @@
 
 #define AI_RESPONSE_MAX 8192
 #define AI_PROMPT_MAX 512
+#define POLYGON_MAX_POINTS 16
 
 static int
 set_display_mode(int mode)
@@ -88,6 +89,33 @@ parse_int(char **cursor, int *value)
 }
 
 static int
+parse_polygon(char **cursor, unsigned char *canvas, int filled)
+{
+  int xs[POLYGON_MAX_POINTS];
+  int ys[POLYGON_MAX_POINTS];
+  int count;
+  int color;
+  int i;
+
+  if(parse_int(cursor, &count) < 0)
+    return -1;
+  if(count < 3 || count > POLYGON_MAX_POINTS)
+    return -1;
+  for(i = 0; i < count; i++){
+    if(parse_int(cursor, &xs[i]) < 0 || parse_int(cursor, &ys[i]) < 0)
+      return -1;
+  }
+  if(parse_int(cursor, &color) < 0 || !line_done(*cursor))
+    return -1;
+
+  if(filled)
+    canvas_fillpolygon(canvas, xs, ys, count, color);
+  else
+    canvas_polygon(canvas, xs, ys, count, color);
+  return 0;
+}
+
+static int
 parse_line(unsigned char *canvas, char *line, int *saw_end)
 {
   char *cursor = line;
@@ -96,6 +124,8 @@ parse_line(unsigned char *canvas, char *line, int *saw_end)
   int c;
   int d;
   int e;
+  int f;
+  int g;
 
   *saw_end = 0;
   skip_spaces(&cursor);
@@ -161,6 +191,44 @@ parse_line(unsigned char *canvas, char *line, int *saw_end)
     canvas_fillcircle(canvas, a, b, c, d);
     return 0;
   }
+  if(match_command(&cursor, "TRIANGLE")){
+    if(parse_int(&cursor, &a) < 0 || parse_int(&cursor, &b) < 0 ||
+       parse_int(&cursor, &c) < 0 || parse_int(&cursor, &d) < 0 ||
+       parse_int(&cursor, &e) < 0 || parse_int(&cursor, &f) < 0 ||
+       parse_int(&cursor, &g) < 0 || !line_done(cursor))
+      return -1;
+    canvas_triangle(canvas, a, b, c, d, e, f, g);
+    return 0;
+  }
+  if(match_command(&cursor, "FILLTRIANGLE")){
+    if(parse_int(&cursor, &a) < 0 || parse_int(&cursor, &b) < 0 ||
+       parse_int(&cursor, &c) < 0 || parse_int(&cursor, &d) < 0 ||
+       parse_int(&cursor, &e) < 0 || parse_int(&cursor, &f) < 0 ||
+       parse_int(&cursor, &g) < 0 || !line_done(cursor))
+      return -1;
+    canvas_filltriangle(canvas, a, b, c, d, e, f, g);
+    return 0;
+  }
+  if(match_command(&cursor, "ELLIPSE")){
+    if(parse_int(&cursor, &a) < 0 || parse_int(&cursor, &b) < 0 ||
+       parse_int(&cursor, &c) < 0 || parse_int(&cursor, &d) < 0 ||
+       parse_int(&cursor, &e) < 0 || !line_done(cursor))
+      return -1;
+    canvas_ellipse(canvas, a, b, c, d, e);
+    return 0;
+  }
+  if(match_command(&cursor, "FILLELLIPSE")){
+    if(parse_int(&cursor, &a) < 0 || parse_int(&cursor, &b) < 0 ||
+       parse_int(&cursor, &c) < 0 || parse_int(&cursor, &d) < 0 ||
+       parse_int(&cursor, &e) < 0 || !line_done(cursor))
+      return -1;
+    canvas_fillellipse(canvas, a, b, c, d, e);
+    return 0;
+  }
+  if(match_command(&cursor, "POLYGON"))
+    return parse_polygon(&cursor, canvas, 0);
+  if(match_command(&cursor, "FILLPOLYGON"))
+    return parse_polygon(&cursor, canvas, 1);
 
   return -1;
 }
