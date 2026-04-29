@@ -3,7 +3,7 @@
 #include "fcntl.h"
 #include "drawlib.h"
 
-#define AI_RESPONSE_MAX 8192
+#define AI_RESPONSE_MAX 32768
 #define AI_PROMPT_MAX 512
 #define POLYGON_MAX_POINTS 16
 

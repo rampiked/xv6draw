@@ -81,10 +81,9 @@ load_env_file(".env")
 
 HOST = os.environ.get("AIDRAW_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AIDRAW_PORT", "4444"))
-AI_BACKEND = os.environ.get("AI_BACKEND", "gemini").strip().lower()
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-4-7")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
-OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
+ANTHROPIC_API_URL = os.environ.get("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages")
 
 PROMPT_PREAMBLE = f"""Generate a drawing plan for a 320x200 canvas.
 Return JSON only. Do not return DSL directly.
@@ -187,29 +186,10 @@ def read_request(sock_file) -> str | None:
     return " ".join(part for part in prompt_lines if part).strip()
 
 
-def extract_openai_response_text(body: dict) -> str | None:
-    output_text = body.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip()
-
-    parts = []
-    for item in body.get("output", []):
-        if not isinstance(item, dict):
-            continue
-        for content in item.get("content", []):
-            if not isinstance(content, dict):
-                continue
-            text = content.get("text")
-            if isinstance(text, str) and content.get("type") in {"output_text", "text"}:
-                parts.append(text)
-
-    text = "\n".join(part.strip() for part in parts if part and part.strip()).strip()
-    return text or None
-
-
 def gemini_request_text(prompt_text: str) -> str | None:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
+        log("Gemini unavailable: missing GEMINI_API_KEY")
         return None
 
     payload = {
@@ -251,23 +231,42 @@ def gemini_request_text(prompt_text: str) -> str | None:
     return text or None
 
 
-def openai_request_text(prompt_text: str) -> str | None:
-    api_key = os.environ.get("OPENAI_API_KEY")
+def extract_claude_response_text(body: dict) -> str | None:
+    parts = []
+
+    for item in body.get("content", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "text":
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+
+    text = "\n".join(parts).strip()
+    return text or None
+
+
+def claude_request_text(prompt_text: str) -> str | None:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
+        log("Claude unavailable: missing ANTHROPIC_API_KEY")
         return None
 
     payload = {
-        "model": OPENAI_MODEL,
-        "input": prompt_text,
-        "max_output_tokens": 4096,
-        "reasoning": {"effort": "low"},
+        "model": CLAUDE_MODEL,
+        "max_tokens": 4096,
+        "messages": [
+            {"role": "user", "content": prompt_text},
+        ],
     }
     request = urllib.request.Request(
-        OPENAI_API_URL,
+        ANTHROPIC_API_URL,
         data=json.dumps(payload).encode("utf-8"),
         headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
         },
         method="POST",
     )
@@ -277,38 +276,36 @@ def openai_request_text(prompt_text: str) -> str | None:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         details = exc.read().decode("utf-8", "ignore")
-        log(f"OpenAI request failed: HTTP {exc.code}: {details}")
+        log(f"Claude request failed: HTTP {exc.code}: {details}")
         return None
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        log(f"OpenAI request failed: {exc}")
+        log(f"Claude request failed: {exc}")
         return None
 
-    text = extract_openai_response_text(body)
+    text = extract_claude_response_text(body)
     if text is None:
-        log("OpenAI response did not contain candidate text")
+        log("Claude response did not contain candidate text")
         return None
     return text
 
 
 def backend_display_name(backend: str) -> str:
+    if backend == "claude":
+        return "Claude"
     if backend == "gemini":
         return "Gemini"
-    if backend == "openai":
-        return "OpenAI"
     return backend
 
 
 def backend_attempt_order() -> list[str]:
-    if AI_BACKEND in {"gemini", "openai"}:
-        return [AI_BACKEND]
-    return ["gemini", "openai"]
+    return ["claude", "gemini"]
 
 
 def request_text_for_backend(backend: str, prompt_text: str) -> str | None:
+    if backend == "claude":
+        return claude_request_text(prompt_text)
     if backend == "gemini":
         return gemini_request_text(prompt_text)
-    if backend == "openai":
-        return openai_request_text(prompt_text)
     return None
 
 
@@ -560,6 +557,10 @@ def canned_response(prompt: str) -> str:
 
 
 def maybe_generate_with_backend(backend: str, prompt: str) -> str | None:
+    if backend == "claude":
+        log(f"trying Claude model {CLAUDE_MODEL}")
+    elif backend == "gemini":
+        log(f"trying Gemini model {GEMINI_MODEL}")
     return request_text_for_backend(backend, PROMPT_PREAMBLE + prompt)
 
 
@@ -575,6 +576,7 @@ def repair_output(backend: str, prompt: str, bad_output: str, error: str) -> str
         log(f"failed to build {backend_display_name(backend)} repair prompt: {exc}")
         return None
 
+    log(f"requesting {backend_display_name(backend)} repair")
     return request_text_for_backend(backend, repair_prompt)
 
 
@@ -674,6 +676,10 @@ def generate_response(prompt: str) -> str:
                 except ValueError:
                     validated = validate_response(candidate)
                 semantic_validate_response(prompt, validated)
+                if backend == "claude":
+                    log(f"handled by Claude model {CLAUDE_MODEL}")
+                elif backend == "gemini":
+                    log(f"handled by Gemini model {GEMINI_MODEL}")
                 log(f"accepted {backend_name} output: {validated!r}")
                 return validated
             except ValueError as exc:
